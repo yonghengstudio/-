@@ -1,11 +1,11 @@
 local RunScriptFirst = false
 
 local Translations = {
-        ["Tycoon"]="基地",
-        ["Progression"]="进阶",
-        ["Performance"]‎ = "性能",
-        ["Settings"]‎ = "设置",
-        ["key"]‎ = "密钥",
+    ["Tycoon"] = "基地",
+    ["Progression"] = "进阶",
+    ["Performance"] = "性能",
+    ["Settings"] = "设置",
+    ["key"] = "密钥"
 }
 
 local function processTextComponent(gui, newText)
@@ -142,6 +142,7 @@ end
 
 if RunScriptFirst then
     loadScript()
+    task.wait(2)
     startTranslation()
 else
     startTranslation()
