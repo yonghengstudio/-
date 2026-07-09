@@ -245,7 +245,7 @@ local function createRGBSignature()
 
     game:GetService("RunService").RenderStepped:Connect(function()
 
-        hue += 0.005
+        hue = hue + 0.005
 
         if hue >= 1 then
             hue = 0
