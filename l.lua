@@ -98,7 +98,6 @@ local Translations = {
     ["Discord"] = "Discord",
     ["Auto-Load"] = "自动加载",
     ["Save / Overwrite"] = "保存 / 覆盖",
-    ["Load Selectet"] = "加载选择",
     ["Set as Auto-Load"] = "设置为自动加载",
     ["Clear Auto-Load"] = "清除自动加载",
     ["Delete Selected"] = "删除选择项",
@@ -119,11 +118,23 @@ local function processTextComponent(gui, newText)
     return newText
 end
 
+local Printed = {}
+
 local function translateText(text)
-    if not text or type(text) ~= "string" then return text end
-    if Translations[text] then return Translations[text] end
+    if not text or type(text) ~= "string" then
+        return text
+    end
+    if Translations[text] then
+        return Translations[text]
+    end
     for en, cn in pairs(Translations) do
-        if text:find(en) then return text:gsub(en, cn) end
+        if text:find(en, 1, true) then
+            return text:gsub(en, cn)
+        end
+    end
+    if not Printed[text] then
+        Printed[text] = true
+        warn("未翻译文本: [" .. text .. "]")
     end
     return text
 end
