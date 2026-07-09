@@ -98,10 +98,13 @@ local Translations = {
     ["Discord"] = "Discord",
     ["Auto-Load"] = "自动加载",
     ["Save / Overwrite"] = "保存 / 覆盖",
+    ["Load Selectet"] = "加载选择",
     ["Set as Auto-Load"] = "设置为自动加载",
     ["Clear Auto-Load"] = "清除自动加载",
     ["Delete Selected"] = "删除选择项",
     ["Load Selected"] = "加载选择",
+    ["Load Selectet"] = "加载选择",
+    
 }
 
 local function processTextComponent(gui, newText)
@@ -116,50 +119,11 @@ local function processTextComponent(gui, newText)
     return newText
 end
 
-local Printed = {}
-
-local IgnoreWords = {
-    "Developer Console",
-    "HoshiHub",
-    "loader",
-    "verify Key",
-    "Console",
-}
-
-local function shouldIgnore(text)
-    for _, word in ipairs(IgnoreWords) do
-        if text:find(word, 1, true) then
-            return true
-        end
-    end
-    return false
-end
-
-
-local function normalizeText(text)
-    text = text:gsub("%d+", "NUM")
-    text = text:gsub("%s+", " ")
-    return text
-end
-
-local function escapePattern(str)
-    return str:gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
-end
-
 local function translateText(text)
-    if not text or type(text) ~= "string" then
-        return text
-    end
-    if shouldIgnore(text) then
-        return text
-    end
-    if Translations[text] then
-        return Translations[text]
-    end
+    if not text or type(text) ~= "string" then return text end
+    if Translations[text] then return Translations[text] end
     for en, cn in pairs(Translations) do
-        if text:find(en, 1, true) then
-            return text:gsub(escapePattern(en), cn)
-        end
+        if text:find(en) then return text:gsub(en, cn) end
     end
     return text
 end
@@ -179,7 +143,7 @@ local function translateAllElements()
         end
     end
 
-   -- pcall(translateGui, game:GetService("CoreGui"))
+    pcall(translateGui, game:GetService("CoreGui"))
 
     local player = game:GetService("Players").LocalPlayer
     if player and player:FindFirstChild("PlayerGui") then
@@ -212,7 +176,7 @@ local function setupListener()
         end)
     end
 
-   -- pcall(connectToGui, game:GetService("CoreGui"))
+    pcall(connectToGui, game:GetService("CoreGui"))
 
     local player = game:GetService("Players").LocalPlayer
     if player and player:FindFirstChild("PlayerGui") then
@@ -245,7 +209,7 @@ local function createRGBSignature()
 
     game:GetService("RunService").RenderStepped:Connect(function()
 
-        hue = hue + 0.005
+        hue += 0.005
 
         if hue >= 1 then
             hue = 0
