@@ -120,26 +120,29 @@ end
 
 local Printed = {}
 
-local function translateText(text)
-    if  not text or type(text) ~= "string" then
-        return text
-    end
-    if shouldIgnore(text) then
-        return text
-    end
-    if Translations[text] then
-        return Translations[text]
-    end
-    for en, cn in pairs(Translations) do
-        if text:find(en, 1, true) then
-            return text:gsub(en, cn)
+local IgnoreWords = {
+    "Developer Console",
+    "HoshiHub",
+    "loader",
+    "verify Key",
+    "Console",
+}
+
+
+local function shouldIgnore(text)
+    for _, word in ipairs(IgnoreWords) do
+        if text:find(word, 1, true) then
+            return true
         end
     end
-    local key = normalizeText(text)
-    if not Printed[key] then
-        Printed[key] = true
-        warn("未翻译文本: [" .. text .. "]")
-    end
+
+    return false
+end
+
+
+local function normalizeText(text)
+    text = text:gsub("%d+", "NUM")
+    text = text:gsub("%s+", " ")
     return text
 end
 
@@ -158,7 +161,7 @@ local function translateAllElements()
         end
     end
 
-    pcall(translateGui, game:GetService("CoreGui"))
+   -- pcall(translateGui, game:GetService("CoreGui"))
 
     local player = game:GetService("Players").LocalPlayer
     if player and player:FindFirstChild("PlayerGui") then
