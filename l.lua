@@ -102,8 +102,6 @@ local Translations = {
     ["Clear Auto-Load"] = "清除自动加载",
     ["Delete Selected"] = "删除选择项",
     ["Load Selected"] = "加载选择",
-    ["Load Selectet"] = "加载选择",
-    
 }
 
 local function processTextComponent(gui, newText)
@@ -128,14 +126,12 @@ local IgnoreWords = {
     "Console",
 }
 
-
 local function shouldIgnore(text)
     for _, word in ipairs(IgnoreWords) do
         if text:find(word, 1, true) then
             return true
         end
     end
-
     return false
 end
 
@@ -143,6 +139,28 @@ end
 local function normalizeText(text)
     text = text:gsub("%d+", "NUM")
     text = text:gsub("%s+", " ")
+    return text
+end
+
+local function escapePattern(str)
+    return str:gsub("([%^%$%(%)%%%.%[%]%*%+%-%?])", "%%%1")
+end
+
+local function translateText(text)
+    if not text or type(text) ~= "string" then
+        return text
+    end
+    if shouldIgnore(text) then
+        return text
+    end
+    if Translations[text] then
+        return Translations[text]
+    end
+    for en, cn in pairs(Translations) do
+        if text:find(en, 1, true) then
+            return text:gsub(escapePattern(en), cn)
+        end
+    end
     return text
 end
 
