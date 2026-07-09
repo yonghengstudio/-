@@ -120,20 +120,38 @@ end
 
 local Printed = {}
 
+local function normalizeText(text)
+    -- 去除数字，避免 Cash:100 / Cash:200 这种重复提示
+    text = text:gsub("%d+", "NUM")
+    -- 合并多余空格
+    text = text:gsub("%s+", " ")
+    return text
+end
+
 local function translateText(text)
     if not text or type(text) ~= "string" then
         return text
     end
+    -- 空文本不处理
+    if text == "" or #text < 2 then
+        return text
+    end
+    -- 完全匹配
     if Translations[text] then
         return Translations[text]
     end
+    -- 包含匹配
     for en, cn in pairs(Translations) do
         if text:find(en, 1, true) then
-            return text:gsub(en, cn)
+            -- 转义特殊字符，避免 gsub 把它当正
+            local escaped = en:gsub("(%W)", "%%%1")
+            return text:gsub(escaped, cn)
         end
     end
-    if not Printed[text] then
-        Printed[text] = true
+    -- 记录没有翻译的文本
+    local key = normalizeText(text)
+    if not Printed[key] then
+        Printed[key] = true
         warn("未翻译文本: [" .. text .. "]")
     end
     return text
