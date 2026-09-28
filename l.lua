@@ -156,8 +156,7 @@ local function translateText(text)
 end
 
 ------------------------------------------------------------------
--- 漏翻检测：UI 上出现了、但翻译表里没有的英文，会 print 出来
--- 输出格式可以直接复制进 Translations 表：["English"] = "",
+-- 漏翻检测：UI 上出现了、但翻译表里没有的英文，会集中显示在一个可复制的小窗口里
 ------------------------------------------------------------------
 local DebugMissing = true          -- 不需要时改成 false
 local reported = {}                -- 已报告过的文本（数字替换成 # 后去重）
@@ -177,31 +176,142 @@ local function isMissing(text)
     return true
 end
 
+local MISSING_GUI_NAME = "EternalMissing"
+local missingBox, missingTitle
+
+local function refreshMissingUI()
+    if missingBox then
+        missingBox.Text = table.concat(MissingList, "\n")
+    end
+    if missingTitle then
+        missingTitle.Text = "漏翻文本 (" .. #MissingList .. ")"
+    end
+end
+
 local function reportMissing(inst, text)
     local trimmed = trim(text)
     local key = trimmed:gsub("%d+", "#")
     if reported[key] then return end
     reported[key] = true
-    table.insert(MissingList, trimmed)
-
-    local path = ""
-    pcall(function() path = inst:GetFullName() end)
-    print(string.format('[漏翻] ["%s"] = "",  -- %s', trimmed:gsub("\n", "\\n"), path))
+    table.insert(MissingList, (trimmed:gsub("\n", " ")))
+    refreshMissingUI()
 end
 
--- 想一次性复制全部漏翻文本：在执行器里运行 DumpMissing()
-getgenv = getgenv or function() return _G end
-getgenv().DumpMissing = function()
-    local lines = {}
-    for _, t in ipairs(MissingList) do
-        table.insert(lines, string.format('    ["%s"] = "",', (t:gsub("\n", "\\n"))))
+local function copyMissing()
+    local out = table.concat(MissingList, "\n")
+    local fn = setclipboard or toclipboard
+    if type(fn) == "function" then
+        return pcall(fn, out)
     end
-    local out = table.concat(lines, "\n")
-    print("---------- 漏翻列表 ----------\n" .. out)
-    if type(setclipboard) == "function" then
-        pcall(setclipboard, out)
-        print("已复制到剪贴板")
+    return false
+end
+
+-- 漏翻窗口：所有漏翻英文集中显示，可拖动，可一键复制
+local function createMissingUI()
+    if not DebugMissing then return end
+
+    local parent
+    if type(gethui) == "function" then
+        local ok, hui = pcall(gethui)
+        if ok then parent = hui end
     end
+    parent = parent or (LocalPlayer and LocalPlayer:WaitForChild("PlayerGui")) or CoreGui
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = MISSING_GUI_NAME
+    gui.ResetOnSpawn = false
+    gui.DisplayOrder = 999
+    gui.Parent = parent
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 320, 0, 260)
+    frame.Position = UDim2.new(1, -330, 0.5, -130)
+    frame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
+    frame.BorderSizePixel = 0
+    frame.Active = true
+    frame.Draggable = true
+    frame.Parent = gui
+
+    missingTitle = Instance.new("TextLabel")
+    missingTitle.Size = UDim2.new(1, 0, 0, 26)
+    missingTitle.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+    missingTitle.BorderSizePixel = 0
+    missingTitle.Font = Enum.Font.GothamBold
+    missingTitle.TextSize = 14
+    missingTitle.TextColor3 = Color3.new(1, 1, 1)
+    missingTitle.Text = "漏翻文本 (0)"
+    missingTitle.Parent = frame
+
+    local body = Instance.new("Frame")
+    body.Size = UDim2.new(1, 0, 1, -26)
+    body.Position = UDim2.new(0, 0, 0, 26)
+    body.BackgroundTransparency = 1
+    body.Parent = frame
+
+    local function makeButton(text, xScale, xOffset, wScale)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(wScale, -6, 0, 26)
+        b.Position = UDim2.new(xScale, xOffset, 1, -30)
+        b.BackgroundColor3 = Color3.fromRGB(60, 90, 160)
+        b.BorderSizePixel = 0
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 13
+        b.TextColor3 = Color3.new(1, 1, 1)
+        b.Text = text
+        b.Parent = body
+        return b
+    end
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, -8, 1, -38)
+    scroll.Position = UDim2.new(0, 4, 0, 4)
+    scroll.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 5
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.Parent = body
+
+    missingBox = Instance.new("TextBox")
+    missingBox.Size = UDim2.new(1, -6, 0, 0)
+    missingBox.AutomaticSize = Enum.AutomaticSize.Y
+    missingBox.BackgroundTransparency = 1
+    missingBox.ClearTextOnFocus = false
+    missingBox.MultiLine = true
+    missingBox.TextWrapped = true
+    missingBox.TextXAlignment = Enum.TextXAlignment.Left
+    missingBox.TextYAlignment = Enum.TextYAlignment.Top
+    missingBox.Font = Enum.Font.Code
+    missingBox.TextSize = 14
+    missingBox.TextColor3 = Color3.fromRGB(230, 230, 230)
+    missingBox.Text = ""
+    missingBox.Parent = scroll
+
+    local copyBtn = makeButton("复制全部", 0, 4, 0.4)
+    local clearBtn = makeButton("清空", 0.4, 4, 0.3)
+    local hideBtn = makeButton("收起", 0.7, 4, 0.3)
+
+    copyBtn.MouseButton1Click:Connect(function()
+        local ok = copyMissing()
+        copyBtn.Text = ok and "已复制 ✓" or "无法复制,请手动选中"
+        task.delay(1.2, function()
+            copyBtn.Text = "复制全部"
+        end)
+    end)
+
+    clearBtn.MouseButton1Click:Connect(function()
+        table.clear(MissingList)
+        table.clear(reported)
+        refreshMissingUI()
+    end)
+
+    hideBtn.MouseButton1Click:Connect(function()
+        body.Visible = not body.Visible
+        frame.Size = body.Visible and UDim2.new(0, 320, 0, 260) or UDim2.new(0, 320, 0, 26)
+        hideBtn.Text = body.Visible and "收起" or "展开"
+    end)
+
+    refreshMissingUI()
 end
 
 local hooked = setmetatable({}, { __mode = "k" })
@@ -212,6 +322,7 @@ end
 
 local function hook(inst)
     if hooked[inst] or not isTextElement(inst) then return end
+    if inst:FindFirstAncestor(MISSING_GUI_NAME) then return end
     hooked[inst] = true
 
     local function apply()
@@ -297,6 +408,7 @@ end
 -- 启动
 ------------------------------------------------------------------
 local function startTranslation()
+    createMissingUI()
     startWatching()
     createRGBSignature()
 end
