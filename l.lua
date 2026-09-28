@@ -494,6 +494,12 @@ end
 ------------------------------------------------------------------
 local DebugMissing = true          -- 不需要时改成 false
 local DetectOnlyHub = true         -- true = 只检测 loadstring 加载出来的脚本界面，不检测游戏自带 UI
+-- 不需要翻译的文本（按键名、版本号、链接等），不会进漏翻窗口
+local IgnoreTexts = { "RightControl", "RightShift", "LeftControl", "LeftShift", "Delta" }
+local IgnorePatterns = { "^v[%d%.]+$", "discord%.gg/", "^https?://" }
+local IgnoreSet = {}
+for _, t in ipairs(IgnoreTexts) do IgnoreSet[t] = true end
+
 local reported = {}                -- 已报告过的文本（数字替换成 # 后去重）
 local MissingList = {}             -- 所有漏翻文本，方便统一复制
 
@@ -503,6 +509,10 @@ local function isMissing(text)
     if not trimmed:find("%a") then return false end            -- 纯数字/符号
     if trimmed:find("[\228-\233]") then return false end       -- 已含中文
     if Translations[trimmed] then return false end             -- 表里有（如 Discord）
+    if IgnoreSet[trimmed] then return false end                -- 忽略列表
+    for _, p in ipairs(IgnorePatterns) do
+        if trimmed:find(p) then return false end
+    end
 
     -- 去掉富文本标签和数字后，只剩 FPS / Kg 等单位则不算漏翻
     local rest = trimmed:gsub("<[^>]+>", ""):gsub("[%d%.,/%s]", "")
@@ -579,8 +589,20 @@ local function reportMissing(inst, text)
     refreshMissingUI()
 end
 
-local function copyMissing()
-    local out = table.concat(MissingList, "\n")
+local function buildOutput(asCode)
+    if not asCode then
+        return table.concat(MissingList, "\n")
+    end
+    local lines = {}
+    for _, t in ipairs(MissingList) do
+        local esc = t:gsub("\\", "\\\\"):gsub('"', '\\"')
+        table.insert(lines, '["' .. esc .. '"] = "",')
+    end
+    return table.concat(lines, "\n")
+end
+
+local function copyMissing(asCode)
+    local out = buildOutput(asCode)
     local candidates = {
         setclipboard,
         toclipboard,
@@ -679,28 +701,36 @@ local function createMissingUI()
     missingBox.Text = ""
     missingBox.Parent = scroll
 
-    local copyBtn = makeButton("复制全部", 0, 4, 0.4)
-    local clearBtn = makeButton("清空", 0.4, 4, 0.3)
-    local hideBtn = makeButton("收起", 0.7, 4, 0.3)
+    local copyBtn = makeButton("复制全部", 0, 4, 0.25)
+    local codeBtn = makeButton("复制代码", 0.25, 4, 0.25)
+    local clearBtn = makeButton("清空", 0.5, 4, 0.25)
+    local hideBtn = makeButton("收起", 0.75, 4, 0.25)
 
-    copyBtn.MouseButton1Click:Connect(function()
-        if #MissingList == 0 then
-            copyBtn.Text = "列表为空"
-        elseif copyMissing() then
-            copyBtn.Text = "已复制 ✓"
-        else
-            -- 执行器不支持剪贴板：自动全选文本，按 Ctrl+C 即可
-            pcall(function()
-                missingBox:CaptureFocus()
-                missingBox.SelectionStart = 1
-                missingBox.CursorPosition = #missingBox.Text + 1
+    local function bindCopy(btn, label, asCode)
+        btn.MouseButton1Click:Connect(function()
+            if #MissingList == 0 then
+                btn.Text = "列表为空"
+            elseif copyMissing(asCode) then
+                btn.Text = "已复制 ✓"
+            else
+                -- 执行器不支持剪贴板：自动把文本框内容全选，按 Ctrl+C 即可
+                if asCode then
+                    missingBox.Text = buildOutput(true)
+                end
+                pcall(function()
+                    missingBox:CaptureFocus()
+                    missingBox.SelectionStart = 1
+                    missingBox.CursorPosition = #missingBox.Text + 1
+                end)
+                btn.Text = "已全选,按Ctrl+C"
+            end
+            task.delay(1.5, function()
+                btn.Text = label
             end)
-            copyBtn.Text = "已全选,按Ctrl+C"
-        end
-        task.delay(1.5, function()
-            copyBtn.Text = "复制全部"
         end)
-    end)
+    end
+    bindCopy(copyBtn, "复制全部", false)
+    bindCopy(codeBtn, "复制代码", true)
 
     clearBtn.MouseButton1Click:Connect(function()
         table.clear(MissingList)
@@ -717,7 +747,41 @@ local function createMissingUI()
     refreshMissingUI()
 end
 
-local hooked = setmetatable({}, { __mode = "k" })
+------------------------------------------------------------------
+-- 版本、设置保存、汉化开关
+------------------------------------------------------------------
+local ScriptVersion = "1.1.0"
+local UpdateURL = nil                   -- 想要更新提示就填脚本的 raw 链接，例如 "https://raw.githubusercontent.com/你的用户名/仓库名/main/l.lua"
+local ToggleKey = Enum.KeyCode.RightShift  -- 键盘快捷键：开/关汉化（手机点顶部签名即可）
+local SettingsFile = "EternalHanhua.json"
+
+local HttpService = game:GetService("HttpService")
+local Settings = { enabled = true }
+
+local function loadSettings()
+    if type(isfile) ~= "function" or type(readfile) ~= "function" then return end
+    pcall(function()
+        if isfile(SettingsFile) then
+            local data = HttpService:JSONDecode(readfile(SettingsFile))
+            if type(data) == "table" and data.enabled ~= nil then
+                Settings.enabled = (data.enabled == true)
+            end
+        end
+    end)
+end
+
+local function saveSettings()
+    if type(writefile) ~= "function" then return end
+    pcall(function()
+        writefile(SettingsFile, HttpService:JSONEncode(Settings))
+    end)
+end
+
+loadSettings()
+local translationEnabled = Settings.enabled
+
+local hooked = setmetatable({}, { __mode = "k" })     -- inst -> apply 函数
+local originals = setmetatable({}, { __mode = "k" })  -- inst -> 翻译前的英文原文
 
 local function isTextElement(inst)
     return inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox")
@@ -726,12 +790,12 @@ end
 local function hook(inst)
     if hooked[inst] or not isTextElement(inst) then return end
     if inst:FindFirstAncestor(MISSING_GUI_NAME) then return end
-    hooked[inst] = true
-
     local function apply()
+        if not translationEnabled then return end
         local current = inst.Text
         local new = translateText(current)
         if new ~= current then
+            originals[inst] = current -- 记住英文原文，关闭汉化时还原
             inst.Text = new -- 新文本已是中文，不会再次命中，不会死循环
         elseif DebugMissing and isMissing(current)
             and (not DetectOnlyHub or isHubInstance(inst)) then
@@ -747,8 +811,25 @@ local function hook(inst)
         end
     end
 
+    hooked[inst] = apply
     apply()
     inst:GetPropertyChangedSignal("Text"):Connect(apply)
+end
+
+-- 开/关汉化：关闭时把所有已翻译的文字还原成英文，开启时重新翻译
+local function setTranslationEnabled(on)
+    translationEnabled = on and true or false
+    Settings.enabled = translationEnabled
+    if translationEnabled then
+        for _, fn in pairs(hooked) do pcall(fn) end
+    else
+        for inst, orig in pairs(originals) do
+            pcall(function()
+                if inst.Parent then inst.Text = orig end
+            end)
+        end
+    end
+    saveSettings()
 end
 
 local function watch(root)
@@ -777,8 +858,23 @@ local function startWatching()
 end
 
 ------------------------------------------------------------------
--- 彩虹签名
+-- 签名：顶部小胶囊，彩虹渐变；点击（或按 ToggleKey）开/关汉化
 ------------------------------------------------------------------
+local UpdateNotice = ""
+
+local function checkUpdate(onNewVersion)
+    if not UpdateURL then return end
+    task.spawn(function()
+        local ok, body = pcall(function() return game:HttpGet(UpdateURL) end)
+        if ok and type(body) == "string" then
+            local remote = body:match('local ScriptVersion = "([%d%.]+)"')
+            if remote and remote ~= ScriptVersion then
+                onNewVersion(remote)
+            end
+        end
+    end)
+end
+
 local function createRGBSignature()
     if not LocalPlayer then return end
 
@@ -792,27 +888,74 @@ local function createRGBSignature()
     local gui = Instance.new("ScreenGui")
     gui.Name = "EternalSignature"
     gui.ResetOnSpawn = false
+    gui.DisplayOrder = 998
     gui.Parent = parent
 
-    local text = Instance.new("TextLabel")
-    text.Parent = gui
-    text.Size = UDim2.new(0, 300, 0, 50)
-    text.Position = UDim2.new(0.5, -150, 0, 20)
-    text.BackgroundTransparency = 1
-    text.TextScaled = true
-    text.Font = Enum.Font.GothamBold
-    text.Text = "永恒\n汉化作者: 永恒"
+    local pill = Instance.new("TextButton")
+    pill.AutoButtonColor = false
+    pill.AnchorPoint = Vector2.new(0.5, 0)
+    pill.Position = UDim2.new(0.5, 0, 0, 6)
+    pill.Size = UDim2.new(0, 0, 0, 28)
+    pill.AutomaticSize = Enum.AutomaticSize.X
+    pill.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+    pill.BackgroundTransparency = 0.25
+    pill.BorderSizePixel = 0
+    pill.Font = Enum.Font.GothamBold
+    pill.TextSize = 13
+    pill.Parent = gui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(1, 0)
+    corner.Parent = pill
+
+    local padding = Instance.new("UIPadding")
+    padding.PaddingLeft = UDim.new(0, 14)
+    padding.PaddingRight = UDim.new(0, 14)
+    padding.Parent = pill
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Thickness = 1.5
+    stroke.Parent = pill
+
+    local function refreshText()
+        pill.Text = "永恒汉化 · v" .. ScriptVersion .. " · " .. (translationEnabled and "开" or "关") .. UpdateNotice
+        pill.TextTransparency = translationEnabled and 0 or 0.45
+    end
+    refreshText()
+
+    local function toggle()
+        setTranslationEnabled(not translationEnabled)
+        refreshText()
+    end
+    pill.MouseButton1Click:Connect(toggle)
+
+    local UserInputService = game:GetService("UserInputService")
+    local inputConn
+    inputConn = UserInputService.InputBegan:Connect(function(input, processed)
+        if not gui.Parent then
+            inputConn:Disconnect()
+            return
+        end
+        if processed then return end
+        if input.KeyCode == ToggleKey then toggle() end
+    end)
+
+    checkUpdate(function(remote)
+        UpdateNotice = " · 有新版 v" .. remote
+        refreshText()
+    end)
 
     local hue = 0
     local conn
-    conn = RunService.RenderStepped:Connect(function()
+    conn = RunService.Heartbeat:Connect(function(dt)
         -- 界面被销毁后断开连接，避免泄漏
         if not gui.Parent then
             conn:Disconnect()
             return
         end
-        hue = (hue + 0.005) % 1
-        text.TextColor3 = Color3.fromHSV(hue, 1, 1)
+        hue = (hue + dt * 0.3) % 1
+        pill.TextColor3 = Color3.fromHSV(hue, 0.75, 1)
+        stroke.Color = Color3.fromHSV((hue + 0.5) % 1, 0.75, 1)
     end)
 end
 
