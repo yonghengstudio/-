@@ -1,5 +1,8 @@
 local RunScriptFirst = false
 
+-- 开发版 = true（带漏翻检测窗口）；用户版 = false（只汉化，没有调试窗口）
+local DevMode = true
+
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local CoreGui = game:GetService("CoreGui")
@@ -492,8 +495,8 @@ end
 ------------------------------------------------------------------
 -- 漏翻检测：UI 上出现了、但翻译表里没有的英文，会集中显示在一个可复制的小窗口里
 ------------------------------------------------------------------
-local DebugMissing = true          -- 不需要时改成 false
-local DetectOnlyHub = true         -- true = 只检测 loadstring 加载出来的脚本界面，不检测游戏自带 UI
+local DebugMissing = DevMode      -- 漏翻检测，用户版自动关闭
+local HubOnly = true               -- true = 只汉化/检测脚本自己的界面，不碰游戏和执行器的界面（更快）
 -- 不需要翻译的文本（按键名、版本号、链接等），不会进漏翻窗口
 local IgnoreTexts = { "RightControl", "RightShift", "LeftControl", "LeftShift", "Delta" }
 local IgnorePatterns = { "^v[%d%.]+$", "discord%.gg/", "^https?://" }
@@ -564,19 +567,6 @@ end
 local HasGameTexts = next(GameTextSet) ~= nil
 
 local hubTop = {}       -- 已确认是脚本界面的顶层 GUI
-local hubCheckedAt = {} -- 顶层 GUI -> 上次检查未通过的时间
-
-local function getTopLevel(inst)
-    local rootSet = {}
-    for _, r in ipairs(getRoots()) do rootSet[r] = true end
-
-    local cur = inst
-    while cur and cur.Parent do
-        if rootSet[cur.Parent] then return cur end
-        cur = cur.Parent
-    end
-    return nil
-end
 
 local function containsGameText(top)
     for _, d in ipairs(top:GetDescendants()) do
@@ -585,29 +575,6 @@ local function containsGameText(top)
         end
     end
     return false
-end
-
--- 判断一个控件是否属于"脚本界面"（而不是游戏或执行器自己的界面）
--- 已知游戏：顶层界面里出现了该游戏汉化表里的文字，才算脚本界面
--- 未知游戏：退回到"脚本加载后新出现的界面"
-local function isHubInstance(inst)
-    local top = getTopLevel(inst)
-    if not top then return false end
-    if top.Name == MISSING_GUI_NAME or top.Name == "EternalSignature" then return false end
-    if hubTop[top] then return true end
-
-    if HasGameTexts then
-        local now = os.clock()
-        if hubCheckedAt[top] and now - hubCheckedAt[top] < 2 then return false end
-        if containsGameText(top) then
-            hubTop[top] = true
-            return true
-        end
-        hubCheckedAt[top] = now
-        return false
-    end
-
-    return not preexisting[top]
 end
 
 local missingBox, missingTitle
@@ -833,19 +800,20 @@ local function hook(inst)
     if inst:FindFirstAncestor(MISSING_GUI_NAME) then return end
     local function apply()
         if not translationEnabled then return end
+        -- 用户正在输入时不改输入框内容，避免把用户输入的字翻译掉
+        if inst:IsA("TextBox") and inst:IsFocused() then return end
         local current = inst.Text
         local new = translateText(current)
         if new ~= current then
             originals[inst] = current -- 记住英文原文，关闭汉化时还原
             inst.Text = new -- 新文本已是中文，不会再次命中，不会死循环
-        elseif DebugMissing and isMissing(current) then
+        elseif DebugMissing and not inst:IsA("TextBox") and isMissing(current) then
             local snapshotText = current
             task.delay(0.8, function()
                 local ok, still = pcall(function()
                     return inst.Parent ~= nil and inst.Text == snapshotText
                 end)
-                if ok and still and isMissing(snapshotText)
-                    and (not DetectOnlyHub or isHubInstance(inst)) then
+                if ok and still and isMissing(snapshotText) then
                     reportMissing(inst, snapshotText)
                 end
             end)
@@ -873,6 +841,7 @@ local function setTranslationEnabled(on)
     saveSettings()
 end
 
+-- HubOnly = false 时的旧方式：监听整个 root（所有界面）
 local function watch(root)
     if not root then return end
     pcall(function()
@@ -883,19 +852,85 @@ local function watch(root)
     end)
 end
 
+local function isOwnGui(top)
+    return top.Name == MISSING_GUI_NAME or top.Name == "EternalSignature"
+end
+
+-- 确认 top 是脚本界面：给里面所有文字控件挂上汉化，并监听之后新增的控件
+local function confirmHub(top)
+    if hubTop[top] then return end
+    hubTop[top] = true
+    pcall(function()
+        for _, d in ipairs(top:GetDescendants()) do
+            hook(d)
+        end
+        top.DescendantAdded:Connect(hook)
+    end)
+end
+
+local scanState = {}   -- 顶层 GUI -> { count, nextAt, dirty }
+
+local function considerTop(top)
+    if hubTop[top] or isOwnGui(top) then return end
+
+    -- 未知游戏（汉化表为空）：脚本加载后新出现的界面直接当作脚本界面
+    if not HasGameTexts then
+        if not preexisting[top] then confirmHub(top) end
+        return
+    end
+
+    local st = scanState[top]
+    if not st then
+        st = { count = 0, nextAt = 0, dirty = true, once = preexisting[top] }
+        scanState[top] = st
+        -- 新出现的界面：里面有新增控件就标记，稍后再检查（界面通常是先创建、后填字）
+        if not st.once then
+            pcall(function()
+                top.DescendantAdded:Connect(function() st.dirty = true end)
+            end)
+        end
+    end
+
+    local now = os.clock()
+    if now < st.nextAt then return end
+    if st.count >= 60 then return end
+    if st.once and st.count >= 1 then return end          -- 原有界面（如执行器）只检查一次
+    if not (st.dirty or st.count < 8) then return end
+
+    st.dirty = false
+    st.count = st.count + 1
+    st.nextAt = now + 1.5
+
+    -- 顶层界面里出现了当前游戏汉化表里的文字，才算脚本界面
+    if containsGameText(top) then
+        confirmHub(top)
+    end
+end
+
 local function startWatching()
-    watch(CoreGui)
-
-    if LocalPlayer then
-        local pg = LocalPlayer:FindFirstChild("PlayerGui")
-        if pg then watch(pg) end
+    if not HubOnly then
+        for _, root in ipairs(getRoots()) do watch(root) end
+        return
     end
 
-    -- 很多注入器把 UI 放在 gethui() 里
-    if type(gethui) == "function" then
-        local ok, hui = pcall(gethui)
-        if ok then watch(hui) end
+    for _, root in ipairs(getRoots()) do
+        pcall(function()
+            for _, top in ipairs(root:GetChildren()) do considerTop(top) end
+            root.ChildAdded:Connect(function(top) task.defer(considerTop, top) end)
+        end)
     end
+
+    -- 定时检查：兜住"界面先创建、之后才填字"的情况
+    task.spawn(function()
+        while true do
+            task.wait(1)
+            for _, root in ipairs(getRoots()) do
+                pcall(function()
+                    for _, top in ipairs(root:GetChildren()) do considerTop(top) end
+                end)
+            end
+        end
+    end)
 end
 
 ------------------------------------------------------------------
