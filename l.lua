@@ -1,5 +1,10 @@
 local RunScriptFirst = false
 
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local CoreGui = game:GetService("CoreGui")
+local LocalPlayer = Players.LocalPlayer
+
 local Translations = {
     ["Tycoon"] = "基地",
     ["Progression"] = "进阶",
@@ -110,141 +115,195 @@ local Translations = {
     ["Discord"] = "Discord",
     ["Auto-Load"] = "自动加载",
     ["Save / Overwrite"] = "保存 / 覆盖",
-    ["Load Selectet"] = "加载选择",
+    ["Load Selectet"] = "加载选择", -- 原脚本里的拼写错误，保留以便匹配
     ["Set as Auto-Load"] = "设置为自动加载",
     ["Clear Auto-Load"] = "清除自动加载",
     ["Delete Selected"] = "删除选择项",
     ["Load Selected"] = "加载选择",
-    ["Load Selectet"] = "加载选择",
-    
 }
 
-local function processTextComponent(gui, newText)
-    if gui:IsA("TextLabel") or gui:IsA("TextButton") or gui:IsA("TextBox") then
-        pcall(function()
-            gui.RichText = true
-            if gui:FindFirstChildOfClass("UITextSizeConstraint") then
-                gui.UITextSizeConstraint.MaxTextSize = gui.TextSize
-            end
-        end)
-    end
-    return newText
+------------------------------------------------------------------
+-- 翻译逻辑
+-- 只做"整句精确匹配"，避免短词（Auto / key / Game）误伤其他文本。
+-- 另外支持 "标签: 数值" 形式（如 "Cash: 123" -> "现金: 123"）。
+------------------------------------------------------------------
+local function trim(s)
+    return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
 local function translateText(text)
-    if not text or type(text) ~= "string" then return text end
-    if Translations[text] then return Translations[text] end
-    for en, cn in pairs(Translations) do
-        if text:find(en) then return text:gsub(en, cn) end
+    if type(text) ~= "string" or text == "" then return text end
+
+    -- 1. 整句精确匹配
+    local direct = Translations[text]
+    if direct then return direct end
+
+    -- 2. 去掉首尾空白后匹配
+    local trimmed = trim(text)
+    if trimmed ~= text then
+        local t = Translations[trimmed]
+        if t then return t end
     end
+
+    -- 3. "标签: 数值" / "标签：数值"
+    local label, sep, rest = text:match("^(.-)%s*([:：])(.*)$")
+    if label and label ~= "" then
+        local t = Translations[trim(label)]
+        if t then return t .. sep .. rest end
+    end
+
     return text
 end
 
-local function translateAllElements()
-    local function translateGui(gui)
-        for _, element in ipairs(gui:GetDescendants()) do
-            if element:IsA("TextLabel") or element:IsA("TextButton") or element:IsA("TextBox") then
-                local currentText = element.Text
-                if currentText and currentText ~= "" then
-                    local translatedText = translateText(currentText)
-                    if translatedText ~= currentText then
-                        element.Text = processTextComponent(element, translatedText)
-                    end
-                end
-            end
-        end
+------------------------------------------------------------------
+-- 漏翻检测：UI 上出现了、但翻译表里没有的英文，会 print 出来
+-- 输出格式可以直接复制进 Translations 表：["English"] = "",
+------------------------------------------------------------------
+local DebugMissing = true          -- 不需要时改成 false
+local reported = {}                -- 已报告过的文本（数字替换成 # 后去重）
+local MissingList = {}             -- 所有漏翻文本，方便统一复制
+
+local function isMissing(text)
+    local trimmed = trim(text)
+    if trimmed == "" then return false end
+    if not trimmed:find("%a") then return false end            -- 纯数字/符号
+    if trimmed:find("[\228-\233]") then return false end       -- 已含中文
+    if Translations[trimmed] then return false end             -- 表里有（如 Discord）
+
+    local label = trimmed:match("^(.-)%s*[:：]")
+    if label and label ~= "" and Translations[trim(label)] then
+        return false
     end
+    return true
+end
 
-    pcall(translateGui, game:GetService("CoreGui"))
+local function reportMissing(inst, text)
+    local trimmed = trim(text)
+    local key = trimmed:gsub("%d+", "#")
+    if reported[key] then return end
+    reported[key] = true
+    table.insert(MissingList, trimmed)
 
-    local player = game:GetService("Players").LocalPlayer
-    if player and player:FindFirstChild("PlayerGui") then
-        pcall(translateGui, player.PlayerGui)
+    local path = ""
+    pcall(function() path = inst:GetFullName() end)
+    print(string.format('[漏翻] ["%s"] = "",  -- %s', trimmed:gsub("\n", "\\n"), path))
+end
+
+-- 想一次性复制全部漏翻文本：在执行器里运行 DumpMissing()
+getgenv = getgenv or function() return _G end
+getgenv().DumpMissing = function()
+    local lines = {}
+    for _, t in ipairs(MissingList) do
+        table.insert(lines, string.format('    ["%s"] = "",', (t:gsub("\n", "\\n"))))
+    end
+    local out = table.concat(lines, "\n")
+    print("---------- 漏翻列表 ----------\n" .. out)
+    if type(setclipboard) == "function" then
+        pcall(setclipboard, out)
+        print("已复制到剪贴板")
     end
 end
 
-local function setupListener()
-    local function connectToGui(gui)
-        gui.DescendantAdded:Connect(function(descendant)
-            if descendant:IsA("TextLabel") or descendant:IsA("TextButton") or descendant:IsA("TextBox") then
-                local currentText = descendant.Text
-                if currentText and currentText ~= "" then
-                    local translatedText = translateText(currentText)
-                    if translatedText ~= currentText then
-                        descendant.Text = processTextComponent(descendant, translatedText)
-                    end
-                end
+local hooked = setmetatable({}, { __mode = "k" })
 
-                descendant:GetPropertyChangedSignal("Text"):Connect(function()
-                    local newText = descendant.Text
-                    if newText and newText ~= "" then
-                        local translatedText = translateText(newText)
-                        if translatedText ~= newText then
-                            descendant.Text = processTextComponent(descendant, translatedText)
-                        end
-                    end
-                end)
-            end
-        end)
-    end
-
-    pcall(connectToGui, game:GetService("CoreGui"))
-
-    local player = game:GetService("Players").LocalPlayer
-    if player and player:FindFirstChild("PlayerGui") then
-        pcall(connectToGui, player.PlayerGui)
-    end
+local function isTextElement(inst)
+    return inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox")
 end
 
-local function createRGBSignature()
-    local player = game:GetService("Players").LocalPlayer
-    if not player then return end
+local function hook(inst)
+    if hooked[inst] or not isTextElement(inst) then return end
+    hooked[inst] = true
 
-    local gui = Instance.new("ScreenGui")
-    gui.Name = "DavidSignature"
-    gui.ResetOnSpawn = false
-    gui.Parent = player:WaitForChild("PlayerGui")
-
-    local text = Instance.new("TextLabel")
-    text.Parent = gui
-
-    text.Size = UDim2.new(0,300,0,50)
-    text.Position = UDim2.new(0.5,-150,0,20)
-
-    text.BackgroundTransparency = 1
-    text.TextScaled = true
-    text.Font = Enum.Font.GothamBold
-
-    text.Text = "永恒\n汉化作者: 永恒"
-
-    local hue = 0
-
-    game:GetService("RunService").RenderStepped:Connect(function()
-
-        hue += 0.005
-
-        if hue >= 1 then
-            hue = 0
+    local function apply()
+        local current = inst.Text
+        local new = translateText(current)
+        if new ~= current then
+            inst.Text = new -- 新文本已是中文，不会再次命中，不会死循环
+        elseif DebugMissing and isMissing(current) then
+            reportMissing(inst, current)
         end
+    end
 
-        text.TextColor3 = Color3.fromHSV(
-            hue,
-            1,
-            1
-        )
+    apply()
+    inst:GetPropertyChangedSignal("Text"):Connect(apply)
+end
 
+local function watch(root)
+    if not root then return end
+    pcall(function()
+        for _, d in ipairs(root:GetDescendants()) do
+            hook(d)
+        end
+        root.DescendantAdded:Connect(hook)
     end)
 end
 
+local function startWatching()
+    watch(CoreGui)
+
+    if LocalPlayer then
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if pg then watch(pg) end
+    end
+
+    -- 很多注入器把 UI 放在 gethui() 里
+    if type(gethui) == "function" then
+        local ok, hui = pcall(gethui)
+        if ok then watch(hui) end
+    end
+end
+
+------------------------------------------------------------------
+-- 彩虹签名
+------------------------------------------------------------------
+local function createRGBSignature()
+    if not LocalPlayer then return end
+
+    local parent
+    if type(gethui) == "function" then
+        local ok, hui = pcall(gethui)
+        if ok then parent = hui end
+    end
+    parent = parent or LocalPlayer:WaitForChild("PlayerGui")
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "EternalSignature"
+    gui.ResetOnSpawn = false
+    gui.Parent = parent
+
+    local text = Instance.new("TextLabel")
+    text.Parent = gui
+    text.Size = UDim2.new(0, 300, 0, 50)
+    text.Position = UDim2.new(0.5, -150, 0, 20)
+    text.BackgroundTransparency = 1
+    text.TextScaled = true
+    text.Font = Enum.Font.GothamBold
+    text.Text = "永恒\n汉化作者: 永恒"
+
+    local hue = 0
+    local conn
+    conn = RunService.RenderStepped:Connect(function()
+        -- 界面被销毁后断开连接，避免泄漏
+        if not gui.Parent then
+            conn:Disconnect()
+            return
+        end
+        hue = (hue + 0.005) % 1
+        text.TextColor3 = Color3.fromHSV(hue, 1, 1)
+    end)
+end
+
+------------------------------------------------------------------
+-- 启动
+------------------------------------------------------------------
 local function startTranslation()
-    translateAllElements()
-    setupListener()
+    startWatching()
     createRGBSignature()
 end
 
 local function loadScript()
     local success, err = pcall(function()
-loadstring(game:HttpGet("https://hoshihub.site/loader.lua"))()
+        loadstring(game:HttpGet("https://hoshihub.site/loader.lua"))()
     end)
     if not success then
         warn("加载失败:", err)
