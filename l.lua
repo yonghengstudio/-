@@ -159,6 +159,7 @@ end
 -- 漏翻检测：UI 上出现了、但翻译表里没有的英文，会集中显示在一个可复制的小窗口里
 ------------------------------------------------------------------
 local DebugMissing = true          -- 不需要时改成 false
+local DetectOnlyHub = true         -- true = 只检测 loadstring 加载出来的脚本界面，不检测游戏自带 UI
 local reported = {}                -- 已报告过的文本（数字替换成 # 后去重）
 local MissingList = {}             -- 所有漏翻文本，方便统一复制
 
@@ -177,6 +178,49 @@ local function isMissing(text)
 end
 
 local MISSING_GUI_NAME = "EternalMissing"
+
+-- 记录脚本加载前已经存在的界面，之后新出现的顶层界面才算"脚本界面"
+local preexisting = setmetatable({}, { __mode = "k" })
+
+local function getRoots()
+    local roots = { CoreGui }
+    if LocalPlayer then
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if pg then table.insert(roots, pg) end
+    end
+    if type(gethui) == "function" then
+        local ok, hui = pcall(gethui)
+        if ok and hui then table.insert(roots, hui) end
+    end
+    return roots
+end
+
+local function takeSnapshot()
+    for _, root in ipairs(getRoots()) do
+        pcall(function()
+            for _, child in ipairs(root:GetChildren()) do
+                preexisting[child] = true
+            end
+        end)
+    end
+end
+
+local function isHubInstance(inst)
+    local rootSet = {}
+    for _, r in ipairs(getRoots()) do rootSet[r] = true end
+
+    local cur = inst
+    while cur and cur.Parent do
+        if rootSet[cur.Parent] then
+            if preexisting[cur] then return false end
+            if cur.Name == MISSING_GUI_NAME or cur.Name == "EternalSignature" then return false end
+            return true
+        end
+        cur = cur.Parent
+    end
+    return false
+end
+
 local missingBox, missingTitle
 
 local function refreshMissingUI()
@@ -199,9 +243,18 @@ end
 
 local function copyMissing()
     local out = table.concat(MissingList, "\n")
-    local fn = setclipboard or toclipboard
-    if type(fn) == "function" then
-        return pcall(fn, out)
+    local candidates = {
+        setclipboard,
+        toclipboard,
+        set_clipboard,
+        (type(Clipboard) == "table" and Clipboard.set) or nil,
+        (type(syn) == "table" and syn.write_clipboard) or nil,
+    }
+    for _, fn in ipairs(candidates) do
+        if type(fn) == "function" then
+            local ok = pcall(fn, out)
+            if ok then return true end
+        end
     end
     return false
 end
@@ -292,9 +345,20 @@ local function createMissingUI()
     local hideBtn = makeButton("收起", 0.7, 4, 0.3)
 
     copyBtn.MouseButton1Click:Connect(function()
-        local ok = copyMissing()
-        copyBtn.Text = ok and "已复制 ✓" or "无法复制,请手动选中"
-        task.delay(1.2, function()
+        if #MissingList == 0 then
+            copyBtn.Text = "列表为空"
+        elseif copyMissing() then
+            copyBtn.Text = "已复制 ✓"
+        else
+            -- 执行器不支持剪贴板：自动全选文本，按 Ctrl+C 即可
+            pcall(function()
+                missingBox:CaptureFocus()
+                missingBox.SelectionStart = 1
+                missingBox.CursorPosition = #missingBox.Text + 1
+            end)
+            copyBtn.Text = "已全选,按Ctrl+C"
+        end
+        task.delay(1.5, function()
             copyBtn.Text = "复制全部"
         end)
     end)
@@ -330,7 +394,8 @@ local function hook(inst)
         local new = translateText(current)
         if new ~= current then
             inst.Text = new -- 新文本已是中文，不会再次命中，不会死循环
-        elseif DebugMissing and isMissing(current) then
+        elseif DebugMissing and isMissing(current)
+            and (not DetectOnlyHub or isHubInstance(inst)) then
             reportMissing(inst, current)
         end
     end
@@ -421,6 +486,8 @@ local function loadScript()
         warn("加载失败:", err)
     end
 end
+
+takeSnapshot() -- 必须在加载脚本之前
 
 if RunScriptFirst then
     loadScript()
