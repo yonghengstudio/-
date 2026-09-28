@@ -390,11 +390,9 @@ local Games = {
 ------------------------------------------------------------------
 -- 自动选择当前游戏的汉化
 ------------------------------------------------------------------
-local MarketplaceService = game:GetService("MarketplaceService")
-
 local GameName = ""
 pcall(function()
-    GameName = MarketplaceService:GetProductInfo(game.PlaceId).Name or ""
+    GameName = tostring(game.Name or "")
 end)
 
 local function findGame()
@@ -425,9 +423,12 @@ end
 local PatternRules = (CurrentGame and CurrentGame.patterns) or {}
 
 -- 漏翻窗口里显示的游戏标签，方便你确认匹配到了哪个
+local TranslationCount = 0
+for _ in pairs(Translations) do TranslationCount = TranslationCount + 1 end
+
 local GameLabel
 if CurrentGame then
-    GameLabel = CurrentGame.name
+    GameLabel = CurrentGame.name .. " · " .. TranslationCount .. "条"
 else
     GameLabel = "未匹配 " .. GameName .. " (" .. tostring(game.PlaceId) .. ")"
 end
@@ -441,6 +442,22 @@ local function trim(s)
     return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
+
+-- 把 "标签: 数值" 拆成 标签、冒号、数值（支持半角 : 和全角 ：）
+local function splitLabel(text)
+    local a = text:find(":", 1, true)
+    local b = text:find("：", 1, true)
+    local pos, len
+    if a and (not b or a < b) then
+        pos, len = a, 1
+    elseif b then
+        pos, len = b, #"："
+    else
+        return nil
+    end
+    local label = text:sub(1, pos - 1):gsub("%s+$", "")
+    return label, text:sub(pos, pos + len - 1), text:sub(pos + len)
+end
 
 local function translateText(text)
     if type(text) ~= "string" or text == "" then return text end
@@ -457,7 +474,7 @@ local function translateText(text)
     end
 
     -- 3. "标签: 数值" / "标签：数值"
-    local label, sep, rest = text:match("^(.-)%s*([:：])(.*)$")
+    local label, sep, rest = splitLabel(text)
     if label and label ~= "" then
         local t = Translations[trim(label)]
         if t then return t .. sep .. rest end
@@ -491,7 +508,7 @@ local function isMissing(text)
     local rest = trimmed:gsub("<[^>]+>", ""):gsub("[%d%.,/%s]", "")
     if rest == "FPS" or rest == "Kg" or rest == "" then return false end
 
-    local label = trimmed:match("^(.-)%s*[:：]")
+    local label = splitLabel(trimmed)
     if label and label ~= "" and Translations[trim(label)] then
         return false
     end
@@ -718,7 +735,15 @@ local function hook(inst)
             inst.Text = new -- 新文本已是中文，不会再次命中，不会死循环
         elseif DebugMissing and isMissing(current)
             and (not DetectOnlyHub or isHubInstance(inst)) then
-            reportMissing(inst, current)
+            local snapshotText = current
+            task.delay(0.8, function()
+                local ok, still = pcall(function()
+                    return inst.Parent ~= nil and inst.Text == snapshotText
+                end)
+                if ok and still and isMissing(snapshotText) then
+                    reportMissing(inst, snapshotText)
+                end
+            end)
         end
     end
 
@@ -795,9 +820,19 @@ end
 -- 启动
 ------------------------------------------------------------------
 local function startTranslation()
-    createMissingUI()
-    startWatching()
-    createRGBSignature()
+    -- 先启动汉化监听（最重要），其他界面放到独立线程里，出错也不影响
+    local ok, err = pcall(startWatching)
+    if not ok then warn("汉化监听启动失败:", err) end
+
+    task.spawn(function()
+        local ok2, err2 = pcall(createMissingUI)
+        if not ok2 then warn("漏翻窗口创建失败:", err2) end
+    end)
+
+    task.spawn(function()
+        local ok3, err3 = pcall(createRGBSignature)
+        if not ok3 then warn("签名创建失败:", err3) end
+    end)
 end
 
 local function loadScript()
