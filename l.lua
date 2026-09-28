@@ -155,7 +155,7 @@ local Games = {
 
     {
         name = "Steal An Egg",
-        ids = {},                       -- 建议填 PlaceId
+        ids = { 107778070777162 },      -- PlaceId
         names = { "Steal An Egg" },
         translations = {
         ["No matching features"] = "没有匹配的功能",
@@ -365,6 +365,12 @@ local Games = {
         ["Copy Discord"] = "复制Discord",
         ["Unload Script"] = "卸载脚本",
         ["Plot Slot"] = "地块槽位",
+            ["Rebirth"] = "重生",
+            ["ESP"] = "透视",
+            ["Eggs"] = "蛋",
+            ["Plot"] = "地块",
+            ["Event"] = "活动",
+            ["Steal"] = "偷蛋",
         ["off"] = "关",
         ["not active"] = "未激活",
         ["closed"] = "已关闭",
