@@ -528,7 +528,7 @@ end
 local MISSING_GUI_NAME = "EternalMissing"
 
 -- 记录脚本加载前已经存在的界面，之后新出现的顶层界面才算"脚本界面"
-local preexisting = setmetatable({}, { __mode = "k" })
+local preexisting = {}   -- 强引用：只有几个顶层界面，不会造成泄漏
 
 local function getRoots()
     local roots = { CoreGui }
@@ -553,20 +553,61 @@ local function takeSnapshot()
     end
 end
 
-local function isHubInstance(inst)
+-- 当前游戏汉化表里的所有文本（英文原文 + 中文译文），用来识别"哪个界面是脚本界面"
+local GameTextSet = {}
+if CurrentGame then
+    for k, v in pairs(CurrentGame.translations) do
+        GameTextSet[k] = true
+        GameTextSet[v] = true
+    end
+end
+local HasGameTexts = next(GameTextSet) ~= nil
+
+local hubTop = {}       -- 已确认是脚本界面的顶层 GUI
+local hubCheckedAt = {} -- 顶层 GUI -> 上次检查未通过的时间
+
+local function getTopLevel(inst)
     local rootSet = {}
     for _, r in ipairs(getRoots()) do rootSet[r] = true end
 
     local cur = inst
     while cur and cur.Parent do
-        if rootSet[cur.Parent] then
-            if preexisting[cur] then return false end
-            if cur.Name == MISSING_GUI_NAME or cur.Name == "EternalSignature" then return false end
-            return true
-        end
+        if rootSet[cur.Parent] then return cur end
         cur = cur.Parent
     end
+    return nil
+end
+
+local function containsGameText(top)
+    for _, d in ipairs(top:GetDescendants()) do
+        if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+            if GameTextSet[d.Text] then return true end
+        end
+    end
     return false
+end
+
+-- 判断一个控件是否属于"脚本界面"（而不是游戏或执行器自己的界面）
+-- 已知游戏：顶层界面里出现了该游戏汉化表里的文字，才算脚本界面
+-- 未知游戏：退回到"脚本加载后新出现的界面"
+local function isHubInstance(inst)
+    local top = getTopLevel(inst)
+    if not top then return false end
+    if top.Name == MISSING_GUI_NAME or top.Name == "EternalSignature" then return false end
+    if hubTop[top] then return true end
+
+    if HasGameTexts then
+        local now = os.clock()
+        if hubCheckedAt[top] and now - hubCheckedAt[top] < 2 then return false end
+        if containsGameText(top) then
+            hubTop[top] = true
+            return true
+        end
+        hubCheckedAt[top] = now
+        return false
+    end
+
+    return not preexisting[top]
 end
 
 local missingBox, missingTitle
@@ -797,14 +838,14 @@ local function hook(inst)
         if new ~= current then
             originals[inst] = current -- 记住英文原文，关闭汉化时还原
             inst.Text = new -- 新文本已是中文，不会再次命中，不会死循环
-        elseif DebugMissing and isMissing(current)
-            and (not DetectOnlyHub or isHubInstance(inst)) then
+        elseif DebugMissing and isMissing(current) then
             local snapshotText = current
             task.delay(0.8, function()
                 local ok, still = pcall(function()
                     return inst.Parent ~= nil and inst.Text == snapshotText
                 end)
-                if ok and still and isMissing(snapshotText) then
+                if ok and still and isMissing(snapshotText)
+                    and (not DetectOnlyHub or isHubInstance(inst)) then
                     reportMissing(inst, snapshotText)
                 end
             end)
