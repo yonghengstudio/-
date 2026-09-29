@@ -1,11 +1,52 @@
+--[[ ==============================================================
+  永恒汉化脚本 —— 文件结构说明（方便自己以后修改）
+
+  这个脚本做两件事：
+    1. 监听 hub 的界面，把英文文字换成中文
+    2. 加载 hub 本体（loadscript 那一段）
+
+  文件从上到下分这几块：
+    1. 启动开关、服务          最上面
+    2. 汉化数据                通用汉化表 Common + 每个游戏一块的 Games
+    3. 选择当前游戏            findGame：按 PlaceId 或游戏名匹配，合并出最终汉化表
+    4. 翻译逻辑                translateText：整句匹配 / 标签冒号数值 / 动态规则
+    5. 界面识别                getRoots、takeSnapshot、containsGameText
+    6. 设置与开关              ScriptVersion、设置保存、setTranslationEnabled
+    7. 挂钩汉化                hook（每个文字控件）、confirmHub、considerTop、startWatching
+    8. 签名胶囊                createRGBSignature（小胶囊，位置可配置，点击开关汉化）
+    9. 启动                    startTranslation、loadScript、最后的顺序判断
+
+  常见修改：
+    - 补一条汉化    在对应游戏的 translations 里加 ["英文"] = "中文",
+    - 新增游戏      复制 Games 里一整个 { } 块，改 name / ids / names，再填汉化
+    - 改署名        找 createRGBSignature 里的 refreshText
+    - 改开关快捷键  改 ToggleKey
+    - 关掉更新提示  UpdateURL 保持 nil
+
+  发布注意：
+    - 标着 DEV_BEGIN 和 DEV_END 两行标记之间的是开发专用代码
+    - 发给用户的文件用 build_user.py 生成，会把标记之间的内容整块删掉
+    - 不要手动改用户版，永远只改这个文件
+    - 注释里不要写开发专用的函数名或变量名，否则构建脚本会认为有残留而拒绝生成
+================================================================== ]]
+
+-- 启动顺序开关（见文件末尾的启动部分）：
+-- false = 先启动汉化监听，再加载 hub，hub 界面一出现就能翻译（推荐）
+-- true  = 先加载 hub，等 2 秒后再启动汉化
 local RunScriptFirst = false
 
--- 开发版 = true（带漏翻检测窗口）；用户版 = false（只汉化，没有调试窗口）
+--@DEV_BEGIN
+-- 开发版 = true（带漏翻检测窗口）。用户版由 build_user.py 生成，里面不包含任何开发代码。
 local DevMode = true
+-- 开发版目标帧率上限（需要执行器支持 setfpscap）；填 nil 表示不修改
+local FpsCap = 240
+--@DEV_END
 
+-- 常用的 Roblox 内置服务
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local CoreGui = game:GetService("CoreGui")
+-- 当前玩家，后面用它找 PlayerGui（玩家界面容器）
 local LocalPlayer = Players.LocalPlayer
 
 ------------------------------------------------------------------
@@ -21,6 +62,8 @@ local LocalPlayer = Players.LocalPlayer
 ------------------------------------------------------------------
 local ForceGame = nil   -- 想手动指定汉化时填游戏 name，例如 "Steal An Egg"；nil = 自动匹配
 
+-- 把英文时间缩写换成中文：1h -> 1时，2m -> 2分，3s -> 3秒
+-- 给下面各游戏的动态文本规则（patterns）使用
 local function cnTime(s)
     s = s:gsub("(%d+)h", "%1时")
     s = s:gsub("(%d+)m", "%1分")
@@ -28,6 +71,8 @@ local function cnTime(s)
     return s
 end
 
+-- 通用汉化表：所有游戏都会加载
+-- 格式：["英文原文"] = "中文译文"，英文必须和界面上的文字完全一致（区分大小写、空格）
 local Common = {
     ["Settings"] = "设置",
     ["Config"] = "配置",
@@ -52,11 +97,18 @@ local Common = {
     ["Load Selected"] = "加载选择",
 }
 
+-- 游戏列表：每个游戏一个 { } 块
+-- 运行时只加载「通用 + 当前游戏」这两份，游戏之间互不干扰
 local Games = {
     {
+        -- 游戏块 1
+        -- name  显示名（也用于 ForceGame 手动指定）
+        -- ids   填 PlaceId 或 GameId，精确匹配（最推荐，填了就不靠游戏名）
+        -- names 游戏名包含这些关键字就匹配（不区分大小写）
         name = "Lemon Tycoon",          -- 名称是猜的，请核对；在漏翻窗口标题里能看到实际游戏名
         ids = {},                       -- 建议填 PlaceId
         names = { "Lemon" },
+        -- 该游戏专属汉化表，同名词条会覆盖上面的通用表
         translations = {
         ["Tycoon"] = "基地",
         ["Progression"] = "进阶",
@@ -153,13 +205,16 @@ local Games = {
         ["Ascension"] = "飞升",
         ["Overlay (fullscreen status)"] = "覆盖层（全屏状态）",
         },
+        -- 动态文本规则（带数字的文本），这个游戏暂时没有
         patterns = {},
     },
 
     {
+        -- 游戏块 2：Steal An Egg（ids 已填 PlaceId）
         name = "Steal An Egg",
         ids = { 107778070777162 },      -- PlaceId
         names = { "Steal An Egg" },
+        -- 该游戏专属汉化表
         translations = {
         ["No matching features"] = "没有匹配的功能",
         ["FREE"] = "免费",
@@ -379,6 +434,9 @@ local Games = {
         ["closed"] = "已关闭",
         ["None"] = "无",
         },
+        -- 动态文本规则：每条 { 匹配模式, 替换内容 }
+        -- 模式是 Lua 模式（不是正则）：%d 数字、(.+) 捕获、%1 引用捕获、特殊字符前加 % 转义
+        -- 替换内容可以是字符串，也可以是函数（参数是捕获到的内容，返回替换后的文字）
         patterns = {
             { "^next in (%d+[hms].*)$", function(t) return "下次 " .. cnTime(t) .. "后" end },
             { "^in (%d+[hms].*)$", function(t) return cnTime(t) .. "后" end },
@@ -393,11 +451,14 @@ local Games = {
 ------------------------------------------------------------------
 -- 自动选择当前游戏的汉化
 ------------------------------------------------------------------
+-- 当前游戏名（game.Name 不会卡住），用于按名字匹配和界面提示
 local GameName = ""
 pcall(function()
     GameName = tostring(game.Name or "")
 end)
 
+-- 找当前游戏对应的配置，没匹配到返回 nil
+-- ForceGame 优先；否则先按 ids 匹配，再按 names 关键字匹配
 local function findGame()
     for _, g in ipairs(Games) do
         if ForceGame then
@@ -415,14 +476,17 @@ local function findGame()
     return nil
 end
 
+-- 当前游戏配置（nil = 没匹配到，此时只加载通用汉化）
 local CurrentGame = findGame()
 
 -- 合并：通用 + 当前游戏（同名以游戏专属为准）
+-- 合并出最终使用的汉化表：先放通用，再放当前游戏的（同名以游戏专属为准）
 local Translations = {}
 for k, v in pairs(Common) do Translations[k] = v end
 if CurrentGame then
     for k, v in pairs(CurrentGame.translations) do Translations[k] = v end
 end
+-- 动态文本规则（当前游戏的 patterns，没有就是空表）
 local PatternRules = (CurrentGame and CurrentGame.patterns) or {}
 
 -- 漏翻窗口里显示的游戏标签，方便你确认匹配到了哪个
@@ -441,6 +505,7 @@ end
 -- 只做"整句精确匹配"，避免短词（Auto / key / Game）误伤其他文本。
 -- 另外支持 "标签: 数值" 形式（如 "Cash: 123" -> "现金: 123"）。
 ------------------------------------------------------------------
+-- 去掉首尾空白。外层多加一层括号，是为了只返回第一个值（gsub 会返回两个值）
 local function trim(s)
     return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
@@ -448,6 +513,7 @@ end
 
 -- 把 "标签: 数值" 拆成 标签、冒号、数值（支持半角 : 和全角 ：）
 local function splitLabel(text)
+    -- 分别找半角冒号和全角冒号的位置（第 4 个参数 true = 按普通文字查找，不当模式）
     local a = text:find(":", 1, true)
     local b = text:find("：", 1, true)
     local pos, len
@@ -462,6 +528,9 @@ local function splitLabel(text)
     return label, text:sub(pos, pos + len - 1), text:sub(pos + len)
 end
 
+-- 翻译核心函数：传入界面上的文字，返回翻译后的文字，没有匹配就原样返回
+-- 匹配顺序：整句 -> 去空白 -> 「标签: 数值」 -> 动态规则
+-- 刻意不做子串替换，避免 Auto、key 这类短词误伤别的文字
 local function translateText(text)
     if type(text) ~= "string" or text == "" then return text end
 
@@ -495,8 +564,9 @@ end
 ------------------------------------------------------------------
 -- 漏翻检测：UI 上出现了、但翻译表里没有的英文，会集中显示在一个可复制的小窗口里
 ------------------------------------------------------------------
-local DebugMissing = DevMode      -- 漏翻检测，用户版自动关闭
-local HubOnly = true               -- true = 只汉化/检测脚本自己的界面，不碰游戏和执行器的界面（更快）
+local HubOnly = true               -- true = 只汉化脚本自己的界面，不碰游戏和执行器的界面（更快）
+--@DEV_BEGIN
+local DebugMissing = DevMode      -- 漏翻检测开关
 -- 不需要翻译的文本（按键名、版本号、链接等），不会进漏翻窗口
 local IgnoreTexts = { "RightControl", "RightShift", "LeftControl", "LeftShift", "Delta" }
 local IgnorePatterns = { "^v[%d%.]+$", "discord%.gg/", "^https?://" }
@@ -506,6 +576,8 @@ for _, t in ipairs(IgnoreTexts) do IgnoreSet[t] = true end
 local reported = {}                -- 已报告过的文本（数字替换成 # 后去重）
 local MissingList = {}             -- 所有漏翻文本，方便统一复制
 
+-- 判断一段文字是不是「漏翻」：含英文字母、不含中文、汉化表里没有、也不在忽略列表里
+-- 返回 true 表示需要报告
 local function isMissing(text)
     local trimmed = trim(text)
     if trimmed == "" then return false end
@@ -527,12 +599,15 @@ local function isMissing(text)
     end
     return true
 end
+--@DEV_END
 
+-- 开发面板的界面名称：汉化监听会跳过这个名字的界面，避免自己检测自己
 local MISSING_GUI_NAME = "EternalMissing"
 
 -- 记录脚本加载前已经存在的界面，之后新出现的顶层界面才算"脚本界面"
 local preexisting = {}   -- 强引用：只有几个顶层界面，不会造成泄漏
 
+-- 所有可能放脚本界面的容器：CoreGui、PlayerGui，以及 gethui()（很多执行器把界面放在这里）
 local function getRoots()
     local roots = { CoreGui }
     if LocalPlayer then
@@ -546,6 +621,8 @@ local function getRoots()
     return roots
 end
 
+-- 记录脚本启动时已有的顶层界面（执行器、游戏自带的界面）
+-- 之后新出现的界面才有可能是脚本界面。必须在加载 hub 之前调用
 local function takeSnapshot()
     for _, root in ipairs(getRoots()) do
         pcall(function()
@@ -568,35 +645,66 @@ local HasGameTexts = next(GameTextSet) ~= nil
 
 local hubTop = {}       -- 已确认是脚本界面的顶层 GUI
 
+-- 检查一个顶层界面里有没有出现当前游戏汉化表里的文字（英文原文或中文译文）
+-- 有 = 说明它是脚本界面。遍历所有后代控件，所以不要太频繁调用
 local function containsGameText(top)
-    for _, d in ipairs(top:GetDescendants()) do
-        if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+    local list = top:GetDescendants()
+    for i = 1, #list do
+        local d = list[i]
+        local c = d.ClassName   -- 直接比类名，比连续调用三次 IsA 快
+        if c == "TextLabel" or c == "TextButton" or c == "TextBox" then
             if GameTextSet[d.Text] then return true end
         end
+        -- 界面很大时每检查 400 个控件让出一帧，避免卡顿（240 帧下一帧只有约 4 毫秒）
+        if i % 400 == 0 then task.wait() end
     end
     return false
 end
 
+--@DEV_BEGIN
 local missingBox, missingTitle
+
+-- 刷新开发面板：更新文本框内容和标题里的数量
+local missingFps = 0            -- 当前帧率（面板自己每 0.5 秒统计一次）
+local MAX_MISSING = 500        -- 最多记录多少条，防止列表无限变长拖慢面板
+
+-- 只刷新标题：漏翻数量、当前游戏、帧率
+local function refreshTitle()
+    if missingTitle then
+        missingTitle.Text = "漏翻(" .. #MissingList .. ") · " .. GameLabel .. " · " .. missingFps .. "fps"
+    end
+end
 
 local function refreshMissingUI()
     if missingBox then
         missingBox.Text = table.concat(MissingList, "\n")
     end
-    if missingTitle then
-        missingTitle.Text = "漏翻(" .. #MissingList .. ") · " .. GameLabel
-    end
+    refreshTitle()
 end
 
+-- 合并刷新：短时间内多条漏翻只刷新一次（每次刷新都要重排整个文本框，很费性能）
+local refreshQueued = false
+local function queueRefresh()
+    if refreshQueued then return end
+    refreshQueued = true
+    task.delay(0.25, function()
+        refreshQueued = false
+        refreshMissingUI()
+    end)
+end
+
+-- 记录一条漏翻文本：数字换成 # 后去重，同一句只记一次
 local function reportMissing(inst, text)
     local trimmed = trim(text)
     local key = trimmed:gsub("%d+", "#")
     if reported[key] then return end
+    if #MissingList >= MAX_MISSING then return end
     reported[key] = true
     table.insert(MissingList, (trimmed:gsub("\n", " ")))
-    refreshMissingUI()
+    queueRefresh()
 end
 
+-- 生成要复制的内容：asCode 为 false 是纯英文每行一条；true 是 ["英文"] = "", 代码格式
 local function buildOutput(asCode)
     if not asCode then
         return table.concat(MissingList, "\n")
@@ -609,8 +717,8 @@ local function buildOutput(asCode)
     return table.concat(lines, "\n")
 end
 
-local function copyMissing(asCode)
-    local out = buildOutput(asCode)
+-- 复制到剪贴板：依次尝试各执行器常见的剪贴板函数，成功返回 true，全都不支持返回 false
+local function copyText(out)
     local candidates = {
         setclipboard,
         toclipboard,
@@ -627,8 +735,41 @@ local function copyMissing(asCode)
     return false
 end
 
+-- 复制漏翻列表（asCode 决定格式，见 buildOutput）
+local function copyMissing(asCode)
+    return copyText(buildOutput(asCode))
+end
+
+-- 游戏信息文字：显示在面板顶部。PlaceId 是当前地图，GameId 是整个游戏（Universe）
+-- 新增游戏汉化时，把 PlaceId 填进该游戏块的 ids，以后就按 ID 精确匹配
+local function gameInfoText()
+    return string.format(
+        "PlaceId %s · GameId %s\n%s · %s",
+        tostring(game.PlaceId),
+        tostring(game.GameId),
+        GameName,
+        CurrentGame and ("已匹配 " .. CurrentGame.name) or "未匹配汉化"
+    )
+end
+
+-- 生成「新增游戏」的代码模板：已经填好 name / ids / names，直接粘进 Games 表里再补词条就行
+local function buildGameTemplate()
+    local safe = GameName:gsub("\\", "\\\\"):gsub('"', '\\"')
+    return table.concat({
+        "    {",
+        '        name = "' .. safe .. '",',
+        "        ids = { " .. tostring(game.PlaceId) .. " },",
+        '        names = { "' .. safe .. '" },',
+        "        translations = {",
+        "        },",
+        "        patterns = {},",
+        "    },",
+    }, "\n")
+end
+
 -- 漏翻窗口：所有漏翻英文集中显示，可拖动，可一键复制
 local function createMissingUI()
+    -- 开发开关关闭时不创建面板
     if not DebugMissing then return end
 
     local parent
@@ -644,6 +785,7 @@ local function createMissingUI()
     gui.DisplayOrder = 999
     gui.Parent = parent
 
+    -- 主窗口（可拖动），默认在屏幕右侧
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(0, 320, 0, 260)
     frame.Position = UDim2.new(1, -330, 0.5, -130)
@@ -653,6 +795,7 @@ local function createMissingUI()
     frame.Draggable = true
     frame.Parent = gui
 
+    -- 标题栏：显示漏翻数量和当前游戏，方便确认汉化表是否匹配对
     missingTitle = Instance.new("TextLabel")
     missingTitle.Size = UDim2.new(1, 0, 0, 26)
     missingTitle.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
@@ -664,12 +807,14 @@ local function createMissingUI()
     missingTitle.Text = "漏翻(0) · " .. GameLabel
     missingTitle.Parent = frame
 
+    -- 内容区：点「收起」时整块隐藏
     local body = Instance.new("Frame")
     body.Size = UDim2.new(1, 0, 1, -26)
     body.Position = UDim2.new(0, 0, 0, 26)
     body.BackgroundTransparency = 1
     body.Parent = frame
 
+    -- 创建底部按钮的小工具函数：xScale/wScale 决定横向位置和宽度比例
     local function makeButton(text, xScale, xOffset, wScale)
         local b = Instance.new("TextButton")
         b.Size = UDim2.new(wScale, -6, 0, 26)
@@ -677,16 +822,31 @@ local function createMissingUI()
         b.BackgroundColor3 = Color3.fromRGB(60, 90, 160)
         b.BorderSizePixel = 0
         b.Font = Enum.Font.GothamBold
-        b.TextSize = 13
+        b.TextSize = 12
         b.TextColor3 = Color3.new(1, 1, 1)
         b.Text = text
         b.Parent = body
         return b
     end
 
+    -- 游戏信息：PlaceId、GameId、游戏名、是否匹配到汉化
+    local info = Instance.new("TextLabel")
+    info.Size = UDim2.new(1, -8, 0, 32)
+    info.Position = UDim2.new(0, 4, 0, 4)
+    info.BackgroundTransparency = 1
+    info.Font = Enum.Font.Code
+    info.TextSize = 11
+    info.TextColor3 = Color3.fromRGB(170, 200, 255)
+    info.TextXAlignment = Enum.TextXAlignment.Left
+    info.TextYAlignment = Enum.TextYAlignment.Top
+    info.TextWrapped = true
+    info.Text = gameInfoText()
+    info.Parent = body
+
+    -- 可滚动区域：里面放文本框，内容变长时自动撑开
     local scroll = Instance.new("ScrollingFrame")
-    scroll.Size = UDim2.new(1, -8, 1, -38)
-    scroll.Position = UDim2.new(0, 4, 0, 4)
+    scroll.Size = UDim2.new(1, -8, 1, -76)
+    scroll.Position = UDim2.new(0, 4, 0, 40)
     scroll.BackgroundColor3 = Color3.fromRGB(15, 15, 18)
     scroll.BorderSizePixel = 0
     scroll.ScrollBarThickness = 5
@@ -694,6 +854,7 @@ local function createMissingUI()
     scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
     scroll.Parent = body
 
+    -- 显示漏翻列表的文本框：用 TextBox 是为了不支持剪贴板时可以手动选中复制
     missingBox = Instance.new("TextBox")
     missingBox.Size = UDim2.new(1, -6, 0, 0)
     missingBox.AutomaticSize = Enum.AutomaticSize.Y
@@ -709,22 +870,24 @@ local function createMissingUI()
     missingBox.Text = ""
     missingBox.Parent = scroll
 
-    local copyBtn = makeButton("复制全部", 0, 4, 0.25)
-    local codeBtn = makeButton("复制代码", 0.25, 4, 0.25)
-    local clearBtn = makeButton("清空", 0.5, 4, 0.25)
-    local hideBtn = makeButton("收起", 0.75, 4, 0.25)
+    -- 四个按钮平分底部宽度：复制全部 / 复制代码 / 清空 / 收起
+    local copyBtn = makeButton("复制全部", 0, 4, 0.2)
+    local codeBtn = makeButton("复制代码", 0.2, 4, 0.2)
+    local idBtn = makeButton("复制ID", 0.4, 4, 0.2)
+    local clearBtn = makeButton("清空", 0.6, 4, 0.2)
+    local hideBtn = makeButton("收起", 0.8, 4, 0.2)
 
-    local function bindCopy(btn, label, asCode)
+    -- 给复制按钮绑定点击：getText 返回要复制的内容
+    -- 成功显示已复制；执行器不支持剪贴板时，把内容放进文本框并自动全选，按 Ctrl+C 即可
+    local function bindCopy(btn, label, getText)
         btn.MouseButton1Click:Connect(function()
-            if #MissingList == 0 then
+            local out = getText()
+            if out == "" then
                 btn.Text = "列表为空"
-            elseif copyMissing(asCode) then
+            elseif copyText(out) then
                 btn.Text = "已复制 ✓"
             else
-                -- 执行器不支持剪贴板：自动把文本框内容全选，按 Ctrl+C 即可
-                if asCode then
-                    missingBox.Text = buildOutput(true)
-                end
+                missingBox.Text = out
                 pcall(function()
                     missingBox:CaptureFocus()
                     missingBox.SelectionStart = 1
@@ -737,15 +900,18 @@ local function createMissingUI()
             end)
         end)
     end
-    bindCopy(copyBtn, "复制全部", false)
-    bindCopy(codeBtn, "复制代码", true)
+    bindCopy(copyBtn, "复制全部", function() return buildOutput(false) end)
+    bindCopy(codeBtn, "复制代码", function() return buildOutput(true) end)
+    bindCopy(idBtn, "复制ID", buildGameTemplate)
 
+    -- 清空：同时清掉去重记录，之后同样的文字还会再报
     clearBtn.MouseButton1Click:Connect(function()
         table.clear(MissingList)
         table.clear(reported)
         refreshMissingUI()
     end)
 
+    -- 收起 / 展开：只留标题栏或恢复完整窗口
     hideBtn.MouseButton1Click:Connect(function()
         body.Visible = not body.Visible
         frame.Size = body.Visible and UDim2.new(0, 320, 0, 260) or UDim2.new(0, 320, 0, 26)
@@ -753,19 +919,47 @@ local function createMissingUI()
     end)
 
     refreshMissingUI()
+
+    -- 帧率显示：Heartbeat 每帧只做一次加法，每 0.5 秒才更新一次标题，几乎不占性能
+    local frames = 0
+    local fpsConn = RunService.Heartbeat:Connect(function()
+        frames = frames + 1
+    end)
+    task.spawn(function()
+        local last = os.clock()
+        while gui.Parent do
+            task.wait(0.5)
+            local now = os.clock()
+            missingFps = math.floor(frames / (now - last) + 0.5)
+            frames = 0
+            last = now
+            refreshTitle()
+        end
+        fpsConn:Disconnect()
+    end)
 end
+
+--@DEV_END
 
 ------------------------------------------------------------------
 -- 版本、设置保存、汉化开关
 ------------------------------------------------------------------
+-- 脚本版本号，改版本时改这里
+-- 检查更新功能靠这一行的格式识别线上版本，所以这行格式不要改
 local ScriptVersion = "1.1.0"
 local UpdateURL = nil                   -- 想要更新提示就填脚本的 raw 链接，例如 "https://raw.githubusercontent.com/你的用户名/仓库名/main/l.lua"
-local ToggleKey = Enum.KeyCode.RightShift  -- 键盘快捷键：开/关汉化（手机点顶部签名即可）
+local ToggleKey = Enum.KeyCode.RightShift  -- 键盘快捷键：开/关汉化（手机点签名即可）
+-- 签名的位置，可选：TopLeft 左上 / TopCenter 上中 / TopRight 右上 / BottomLeft 左下 / BottomCenter 下中 / BottomRight 右下
+local SignaturePosition = "TopRight"
+-- 设置文件名（存在执行器的 workspace 目录），用来记住汉化开关
 local SettingsFile = "EternalHanhua.json"
 
+-- 用于把设置转成 JSON 文本，或从 JSON 文本读回来
 local HttpService = game:GetService("HttpService")
+-- 当前设置，目前只有一项：enabled（汉化开关）
 local Settings = { enabled = true }
 
+-- 读取设置。执行器不支持文件函数、文件不存在或内容损坏时保持默认值，用 pcall 保护，出错不影响脚本
 local function loadSettings()
     if type(isfile) ~= "function" or type(readfile) ~= "function" then return end
     pcall(function()
@@ -778,6 +972,7 @@ local function loadSettings()
     end)
 end
 
+-- 保存设置到文件（同样用 pcall 保护）
 local function saveSettings()
     if type(writefile) ~= "function" then return end
     pcall(function()
@@ -785,28 +980,40 @@ local function saveSettings()
     end)
 end
 
+-- 启动时先读一次设置
 loadSettings()
+-- 当前汉化开关状态：true = 开启
 local translationEnabled = Settings.enabled
 
 local hooked = setmetatable({}, { __mode = "k" })     -- inst -> apply 函数
 local originals = setmetatable({}, { __mode = "k" })  -- inst -> 翻译前的英文原文
 
+-- 判断是不是带文字的控件（标签、按钮、输入框）
 local function isTextElement(inst)
-    return inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox")
+    local c = inst.ClassName
+    return c == "TextLabel" or c == "TextButton" or c == "TextBox"
 end
 
+-- 给一个文字控件挂上汉化：先翻译一次，之后它的文字一变化就再翻译
+-- 整个脚本的汉化都靠这个函数
 local function hook(inst)
+    -- 已经挂过、或者不是文字控件，就跳过
     if hooked[inst] or not isTextElement(inst) then return end
+    -- 跳过开发面板自己的控件
     if inst:FindFirstAncestor(MISSING_GUI_NAME) then return end
+    -- apply：读取当前文字 -> 翻译 -> 有变化就写回。控件的 Text 每次变化都会执行一次
     local function apply()
         if not translationEnabled then return end
         -- 用户正在输入时不改输入框内容，避免把用户输入的字翻译掉
         if inst:IsA("TextBox") and inst:IsFocused() then return end
         local current = inst.Text
+        -- 翻译，没有匹配时返回原文
         local new = translateText(current)
         if new ~= current then
             originals[inst] = current -- 记住英文原文，关闭汉化时还原
             inst.Text = new -- 新文本已是中文，不会再次命中，不会死循环
+--@DEV_BEGIN
+        -- 没翻译成功：交给开发面板检测。输入框跳过；延迟 0.8 秒再确认，避免界面刚创建时误报
         elseif DebugMissing and not inst:IsA("TextBox") and isMissing(current) then
             local snapshotText = current
             task.delay(0.8, function()
@@ -817,11 +1024,15 @@ local function hook(inst)
                     reportMissing(inst, snapshotText)
                 end
             end)
+--@DEV_END
         end
     end
 
+    -- 登记这个控件的 apply，开关汉化时可以批量重新执行
     hooked[inst] = apply
+    -- 立刻翻译一次
     apply()
+    -- 以后文字再变化（计时器刷新、hub 重新写入等）就再翻译一次
     inst:GetPropertyChangedSignal("Text"):Connect(apply)
 end
 
@@ -830,8 +1041,10 @@ local function setTranslationEnabled(on)
     translationEnabled = on and true or false
     Settings.enabled = translationEnabled
     if translationEnabled then
+        -- 开启：对所有已挂钩的控件重新执行 apply
         for _, fn in pairs(hooked) do pcall(fn) end
     else
+        -- 关闭：把翻译过的控件恢复成英文原文
         for inst, orig in pairs(originals) do
             pcall(function()
                 if inst.Parent then inst.Text = orig end
@@ -852,6 +1065,7 @@ local function watch(root)
     end)
 end
 
+-- 是不是脚本自己的界面（签名或开发面板），这些不参与汉化
 local function isOwnGui(top)
     return top.Name == MISSING_GUI_NAME or top.Name == "EternalSignature"
 end
@@ -860,16 +1074,27 @@ end
 local function confirmHub(top)
     if hubTop[top] then return end
     hubTop[top] = true
+
+    -- 先监听之后新增的控件（新增的立刻挂钩），再分批处理已有控件
     pcall(function()
-        for _, d in ipairs(top:GetDescendants()) do
-            hook(d)
-        end
         top.DescendantAdded:Connect(hook)
+    end)
+
+    -- 已有控件每处理 150 个让出一帧，界面再大也不会造成明显卡顿
+    task.spawn(function()
+        local ok, list = pcall(function() return top:GetDescendants() end)
+        if not ok then return end
+        for i = 1, #list do
+            pcall(hook, list[i])
+            if i % 150 == 0 then task.wait() end
+        end
     end)
 end
 
 local scanState = {}   -- 顶层 GUI -> { count, nextAt, dirty }
 
+-- 判断一个顶层界面是不是脚本界面，是就交给 confirmHub 处理
+-- 这个函数会被反复调用（启动时、有新界面时、每秒定时），所以里面限制了检查频率
 local function considerTop(top)
     if hubTop[top] or isOwnGui(top) then return end
 
@@ -879,9 +1104,11 @@ local function considerTop(top)
         return
     end
 
+    -- 这个界面的检查记录：
+    -- count 已检查次数；nextAt 下次最早检查时间；dirty 是否有新增控件；once 原有界面（如执行器）只检查一次
     local st = scanState[top]
     if not st then
-        st = { count = 0, nextAt = 0, dirty = true, once = preexisting[top] }
+        st = { count = 0, nextAt = 0, dirty = true, once = preexisting[top], busy = false }
         scanState[top] = st
         -- 新出现的界面：里面有新增控件就标记，稍后再检查（界面通常是先创建、后填字）
         if not st.once then
@@ -891,22 +1118,31 @@ local function considerTop(top)
         end
     end
 
+    -- 下面是限频规则：太频繁、检查次数太多、原有界面已查过、没有变化，都跳过
     local now = os.clock()
     if now < st.nextAt then return end
+    if st.busy then return end                            -- 上一次检查还没结束（界面很大时会分帧）
     if st.count >= 60 then return end
     if st.once and st.count >= 1 then return end          -- 原有界面（如执行器）只检查一次
     if not (st.dirty or st.count < 8) then return end
 
+    -- 开始一次检查（下面记录次数和下次时间）
     st.dirty = false
     st.count = st.count + 1
     st.nextAt = now + 1.5
 
     -- 顶层界面里出现了当前游戏汉化表里的文字，才算脚本界面
-    if containsGameText(top) then
+    st.busy = true
+    local ok, found = pcall(containsGameText, top)
+    st.busy = false
+    if ok and found then
         confirmHub(top)
     end
 end
 
+-- 启动汉化监听
+-- HubOnly = true ：只监听顶层界面，识别出脚本界面后才挂钩（快）
+-- HubOnly = false：监听所有界面（旧方式，会处理游戏和执行器的界面，较慢）
 local function startWatching()
     if not HubOnly then
         for _, root in ipairs(getRoots()) do watch(root) end
@@ -915,8 +1151,11 @@ local function startWatching()
 
     for _, root in ipairs(getRoots()) do
         pcall(function()
-            for _, top in ipairs(root:GetChildren()) do considerTop(top) end
             root.ChildAdded:Connect(function(top) task.defer(considerTop, top) end)
+            -- 启动时的首轮检查放到独立线程，不拖慢后面加载 hub
+            task.spawn(function()
+                for _, top in ipairs(root:GetChildren()) do considerTop(top) end
+            end)
         end)
     end
 
@@ -934,10 +1173,13 @@ local function startWatching()
 end
 
 ------------------------------------------------------------------
--- 签名：顶部小胶囊，彩虹渐变；点击（或按 ToggleKey）开/关汉化
+-- 签名：小胶囊，彩虹渐变（位置见 SignaturePosition）；点击（或按 ToggleKey）开/关汉化
 ------------------------------------------------------------------
+-- 更新提示文字：发现新版本时会追加到签名上
 local UpdateNotice = ""
 
+-- 检查更新：UpdateURL 为空就不检查
+-- 在后台线程下载线上脚本，比较版本号，不同就调用 onNewVersion 回调
 local function checkUpdate(onNewVersion)
     if not UpdateURL then return end
     task.spawn(function()
@@ -951,6 +1193,35 @@ local function checkUpdate(onNewVersion)
     end)
 end
 
+-- 签名位置预设：{ 锚点, 位置 }，离屏幕边缘 8 像素。想加新位置就在这里加一行
+local SIGNATURE_LAYOUT = {
+    TopLeft      = { Vector2.new(0, 0),   UDim2.new(0, 8, 0, 8) },
+    TopCenter    = { Vector2.new(0.5, 0), UDim2.new(0.5, 0, 0, 8) },
+    TopRight     = { Vector2.new(1, 0),   UDim2.new(1, -8, 0, 8) },
+    BottomLeft   = { Vector2.new(0, 1),   UDim2.new(0, 8, 1, -8) },
+    BottomCenter = { Vector2.new(0.5, 1), UDim2.new(0.5, 0, 1, -8) },
+    BottomRight  = { Vector2.new(1, 1),   UDim2.new(1, -8, 1, -8) },
+}
+
+-- 彩虹色渐变（7 个关键点，首尾同色，所以旋转起来是无缝循环）
+local function rainbowSequence()
+    local points = {}
+    for i = 0, 6 do
+        table.insert(points, ColorSequenceKeypoint.new(i / 6, Color3.fromHSV((i % 6) / 6, 0.75, 1)))
+    end
+    return ColorSequence.new(points)
+end
+
+-- 让渐变一直旋转：交给 TweenService 在引擎里循环（repeatCount = -1 表示无限），
+-- 不需要每帧运行任何 Lua 代码，所以 240 帧下也没有额外开销
+local function spinGradient(gradient, seconds)
+    local info = TweenInfo.new(seconds, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1)
+    local tween = game:GetService("TweenService"):Create(gradient, info, { Rotation = 360 })
+    tween:Play()
+end
+
+-- 创建签名胶囊：显示汉化名称、版本和开关状态
+-- 点击胶囊或按 ToggleKey 可以开/关汉化。想改署名文字，改下面 refreshText 里的字符串
 local function createRGBSignature()
     if not LocalPlayer then return end
 
@@ -961,50 +1232,79 @@ local function createRGBSignature()
     end
     parent = parent or LocalPlayer:WaitForChild("PlayerGui")
 
+    -- 签名所在的 ScreenGui，放在 gethui 或 PlayerGui 里
     local gui = Instance.new("ScreenGui")
     gui.Name = "EternalSignature"
     gui.ResetOnSpawn = false
     gui.DisplayOrder = 998
     gui.Parent = parent
 
-    local pill = Instance.new("TextButton")
-    pill.AutoButtonColor = false
-    pill.AnchorPoint = Vector2.new(0.5, 0)
-    pill.Position = UDim2.new(0.5, 0, 0, 6)
-    pill.Size = UDim2.new(0, 0, 0, 28)
+    local layout = SIGNATURE_LAYOUT[SignaturePosition] or SIGNATURE_LAYOUT.TopRight
+
+    -- 背景胶囊：只负责底色、圆角和描边，宽度随里面的文字自动变化
+    local pill = Instance.new("Frame")
+    pill.AnchorPoint = layout[1]
+    pill.Position = layout[2]
+    pill.Size = UDim2.new(0, 0, 0, 26)
     pill.AutomaticSize = Enum.AutomaticSize.X
     pill.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
     pill.BackgroundTransparency = 0.25
     pill.BorderSizePixel = 0
-    pill.Font = Enum.Font.GothamBold
-    pill.TextSize = 13
     pill.Parent = gui
 
+    -- 圆角，半径取最大就是胶囊形
     local corner = Instance.new("UICorner")
     corner.CornerRadius = UDim.new(1, 0)
     corner.Parent = pill
 
-    local padding = Instance.new("UIPadding")
-    padding.PaddingLeft = UDim.new(0, 14)
-    padding.PaddingRight = UDim.new(0, 14)
-    padding.Parent = pill
-
+    -- 描边：底色是白色，颜色完全来自彩虹渐变
     local stroke = Instance.new("UIStroke")
     stroke.Thickness = 1.5
+    stroke.Color = Color3.new(1, 1, 1)
     stroke.Parent = pill
 
+    local strokeGradient = Instance.new("UIGradient")
+    strokeGradient.Color = rainbowSequence()
+    strokeGradient.Parent = stroke
+    spinGradient(strokeGradient, 4)
+
+    -- 文字按钮：背景透明，渐变只会染到文字上；点击它开/关汉化
+    local label = Instance.new("TextButton")
+    label.AutoButtonColor = false
+    label.BackgroundTransparency = 1
+    label.Size = UDim2.new(0, 0, 1, 0)
+    label.AutomaticSize = Enum.AutomaticSize.X
+    label.Font = Enum.Font.GothamBold
+    label.TextSize = 13
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.Parent = pill
+
+    -- 左右内边距，文字不贴边
+    local padding = Instance.new("UIPadding")
+    padding.PaddingLeft = UDim.new(0, 12)
+    padding.PaddingRight = UDim.new(0, 12)
+    padding.Parent = label
+
+    local textGradient = Instance.new("UIGradient")
+    textGradient.Color = rainbowSequence()
+    textGradient.Parent = label
+    spinGradient(textGradient, 6)
+
+    -- 刷新文字：显示开/关和更新提示；关闭汉化时文字变淡
     local function refreshText()
-        pill.Text = "永恒汉化 · v" .. ScriptVersion .. " · " .. (translationEnabled and "开" or "关") .. UpdateNotice
-        pill.TextTransparency = translationEnabled and 0 or 0.45
+        label.Text = "永恒汉化 · v" .. ScriptVersion .. " · " .. (translationEnabled and "开" or "关") .. UpdateNotice
+        label.TextTransparency = translationEnabled and 0 or 0.45
     end
     refreshText()
 
+    -- 切换汉化开关，并刷新文字
     local function toggle()
         setTranslationEnabled(not translationEnabled)
         refreshText()
     end
-    pill.MouseButton1Click:Connect(toggle)
+    label.MouseButton1Click:Connect(toggle)
 
+    -- 键盘快捷键（电脑用；手机点胶囊即可）。界面销毁后自动断开监听
     local UserInputService = game:GetService("UserInputService")
     local inputConn
     inputConn = UserInputService.InputBegan:Connect(function(input, processed)
@@ -1016,37 +1316,34 @@ local function createRGBSignature()
         if input.KeyCode == ToggleKey then toggle() end
     end)
 
+    -- 后台检查更新，有新版本就在胶囊上提示
     checkUpdate(function(remote)
         UpdateNotice = " · 有新版 v" .. remote
         refreshText()
-    end)
-
-    local hue = 0
-    local conn
-    conn = RunService.Heartbeat:Connect(function(dt)
-        -- 界面被销毁后断开连接，避免泄漏
-        if not gui.Parent then
-            conn:Disconnect()
-            return
-        end
-        hue = (hue + dt * 0.3) % 1
-        pill.TextColor3 = Color3.fromHSV(hue, 0.75, 1)
-        stroke.Color = Color3.fromHSV((hue + 0.5) % 1, 0.75, 1)
     end)
 end
 
 ------------------------------------------------------------------
 -- 启动
 ------------------------------------------------------------------
+-- 启动流程：先启动汉化监听（最重要），再创建签名
+-- 每一步都用 pcall 单独保护，某一步出错不会影响其他步骤，也不会影响 hub 加载
 local function startTranslation()
     -- 先启动汉化监听（最重要），其他界面放到独立线程里，出错也不影响
     local ok, err = pcall(startWatching)
     if not ok then warn("汉化监听启动失败:", err) end
 
+--@DEV_BEGIN
+    -- 设置帧率上限：只是把上限调高，实际帧率取决于设备性能和执行器
+    if FpsCap and type(setfpscap) == "function" then
+        pcall(setfpscap, FpsCap)
+    end
+
     task.spawn(function()
         local ok2, err2 = pcall(createMissingUI)
         if not ok2 then warn("漏翻窗口创建失败:", err2) end
     end)
+--@DEV_END
 
     task.spawn(function()
         local ok3, err3 = pcall(createRGBSignature)
@@ -1054,6 +1351,7 @@ local function startTranslation()
     end)
 end
 
+-- 加载 hub：远程执行 loader.lua。用 pcall 保护，加载失败只警告，不影响汉化
 local function loadScript()
     local success, err = pcall(function()
         loadstring(game:HttpGet("https://hoshihub.site/loader.lua"))()
@@ -1065,6 +1363,7 @@ end
 
 takeSnapshot() -- 必须在加载脚本之前
 
+-- 按 RunScriptFirst 决定启动顺序（见文件开头）
 if RunScriptFirst then
     loadScript()
     task.wait(2)
